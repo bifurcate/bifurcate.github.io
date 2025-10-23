@@ -179,13 +179,18 @@
 </head>
 <body>
     <div id="canvas-container"></div>
-    <div id="mode-indicator">Click in space to place charges</div>
+    <button id="menu-toggle">☰</button>
+    <div id="mode-indicator">Ctrl+Click to place charges</div>
     <div id="controls">
         <div id="global-controls">
             <h3>Simulation Settings</h3>
             <div class="control-group">
                 <label>Test Particles: <span class="value-display" id="test-particles-value">50</span></label>
-                <input type="range" id="test-particles" min="10" max="200" step="10" value="50">
+                <input type="range" id="test-particles" min="10" max="500" step="10" value="50">
+            </div>
+            <div class="control-group">
+                <label>Spawn Count: <span class="value-display" id="spawn-count-value">1</span> per spawn</label>
+                <input type="range" id="spawn-count" min="1" max="10" step="1" value="1">
             </div>
             <div class="control-group">
                 <label>Spawn Rate: <span class="value-display" id="spawn-rate-value">Medium</span></label>
@@ -196,8 +201,20 @@
                 <input type="range" id="field-strength" min="0.1" max="3" step="0.1" value="1">
             </div>
             <div class="control-group">
+                <label>Test Particle Mass: <span class="value-display" id="test-mass-value">0.010</span></label>
+                <input type="range" id="test-mass" min="0.001" max="0.1" step="0.001" value="0.01">
+            </div>
+            <div class="control-group">
                 <label>Trail Decay Rate: <span class="value-display" id="decay-rate-value">Medium</span></label>
                 <input type="range" id="decay-rate" min="1" max="5" step="1" value="3">
+            </div>
+            <div class="control-group">
+                <label>Fog Density: <span class="value-display" id="fog-density-value">Medium</span></label>
+                <input type="range" id="fog-density" min="0" max="4" step="1" value="2">
+            </div>
+            <div class="control-group">
+                <label>Illumination: <span class="value-display" id="illumination-value">50%</span></label>
+                <input type="range" id="illumination" min="0" max="100" step="5" value="50">
             </div>
             <button id="clear-test">Clear Test Particles</button>
         </div>
@@ -215,7 +232,7 @@
     </div>
     <div id="info">
         <strong>Controls:</strong><br>
-        • Click in space to place a charge<br>
+        • Ctrl+Click to place a charge in space<br>
         • Drag to rotate view | Scroll to zoom<br>
         • Particles spawn at positive charges (red)<br>
         • Particles are destroyed at negative charges (blue)
@@ -230,18 +247,21 @@
         
         // Physics constants
         const dt = 0.008;
-        const testMass = 0.01;
-        const testCharge = 0.1;
+        let testMass = 0.01;
+        const testCharge = 1.0; // Fixed at 1
         const k = 8.99; // Coulomb constant (scaled for visualization)
         
         // Control values
         let maxTestParticles = 50;
         let spawnRate = 3;
+        let spawnCount = 1;
         let fieldStrength = 1.0;
         let nextChargeValue = 5.0;
         let frameCount = 0;
         let decayRate = 3; // 1=very slow, 5=very fast
         let trailSegments = []; // Global array for all trail segments
+        let fogDensity = 2; // 0=none, 4=very dense
+        let illumination = 50; // 0-100%
         
         // Mouse controls
         let isDragging = false;
@@ -250,6 +270,18 @@
         let zoom = 40;
         let raycaster = new THREE.Raycaster();
         let mouse = new THREE.Vector2();
+
+        function updateFog() {
+            const fogSettings = [
+                { near: 1000, far: 1000 }, // No fog
+                { near: 60, far: 100 },     // Light
+                { near: 40, far: 80 },      // Medium
+                { near: 25, far: 60 },      // Dense
+                { near: 15, far: 40 }       // Very dense
+            ];
+            const setting = fogSettings[fogDensity];
+            scene.fog = new THREE.Fog(0x000510, setting.near, setting.far);
+        }
 
         function init() {
             scene = new THREE.Scene();
@@ -272,6 +304,10 @@
             
             // Create axes
             createAxes();
+            
+            // Initialize with default dipole configuration
+            addFixedCharge(new THREE.Vector3(10, 0, 0), 1);
+            addFixedCharge(new THREE.Vector3(-10, 0, 0), -1);
             
             // Event listeners
             setupControls();
@@ -481,12 +517,15 @@
             const hue = Math.random() * 60 + 150; // Blue-green range
             const color = new THREE.Color(`hsl(${hue}, 80%, 60%)`);
             
+            // Calculate opacity based on illumination
+            const baseOpacity = illumination / 100;
+            
             // Small particle
             const geometry = new THREE.SphereGeometry(0.15, 8, 8);
             const material = new THREE.MeshBasicMaterial({ 
                 color: color,
                 transparent: true,
-                opacity: 0.8
+                opacity: 0.8 * baseOpacity
             });
             const mesh = new THREE.Mesh(geometry, material);
             mesh.position.copy(position);
@@ -496,7 +535,7 @@
             const glowMaterial = new THREE.MeshBasicMaterial({ 
                 color: color,
                 transparent: true,
-                opacity: 0.3,
+                opacity: 0.3 * baseOpacity,
                 blending: THREE.AdditiveBlending
             });
             const glow = new THREE.Mesh(glowGeometry, glowMaterial);
@@ -511,7 +550,8 @@
                 mesh: mesh,
                 glow: glow,
                 color: color,
-                age: 0
+                age: 0,
+                baseOpacity: baseOpacity
             });
         }
         
@@ -526,7 +566,7 @@
                 
                 // E = k * q / r^2 in direction of r
                 const magnitude = (k * charge.value * fieldStrength) / (distance * distance);
-                const direction = r.normalize();
+                const direction = r.clone().normalize();
                 field.add(direction.multiplyScalar(magnitude));
             });
             
@@ -534,12 +574,18 @@
         }
         
         function addTrailSegment(position, color) {
+            // Limit trail segment creation rate
+            if (trailSegments.length > 4000) return;
+            
+            // Calculate opacity based on illumination
+            const baseOpacity = illumination / 100;
+            
             // Create a small sphere for each trail point
             const geometry = new THREE.SphereGeometry(0.1, 6, 6);
             const material = new THREE.MeshBasicMaterial({ 
                 color: color,
                 transparent: true,
-                opacity: 1.0,
+                opacity: 1.0 * baseOpacity,
                 blending: THREE.AdditiveBlending
             });
             const sphere = new THREE.Mesh(geometry, material);
@@ -549,7 +595,8 @@
             trailSegments.push({
                 mesh: sphere,
                 age: 0,
-                maxAge: 100 // Will be adjusted by decay rate
+                maxAge: 100,
+                baseOpacity: baseOpacity
             });
         }
         
@@ -557,7 +604,11 @@
             // Decay rate affects how long trails last
             const decayMultiplier = [0.3, 0.5, 1.0, 1.5, 2.5][decayRate - 1];
             
-            for (let i = trailSegments.length - 1; i >= 0; i--) {
+            // Process in batches to avoid long single-frame operations
+            const batchSize = Math.min(100, trailSegments.length);
+            let processed = 0;
+            
+            for (let i = trailSegments.length - 1; i >= 0 && processed < batchSize; i--, processed++) {
                 const segment = trailSegments[i];
                 segment.age += decayMultiplier;
                 
@@ -569,21 +620,39 @@
                 
                 // Fade out over time
                 const lifeRatio = 1 - (segment.age / segment.maxAge);
-                segment.mesh.material.opacity = Math.max(0, lifeRatio * 0.6);
+                segment.mesh.material.opacity = Math.max(0, lifeRatio * 0.6 * segment.baseOpacity);
                 segment.mesh.scale.setScalar(0.5 + lifeRatio * 0.5);
                 
                 // Remove when fully decayed
                 if (segment.age >= segment.maxAge) {
+                    segment.mesh.geometry.dispose();
+                    segment.mesh.material.dispose();
                     scene.remove(segment.mesh);
                     trailSegments.splice(i, 1);
                 }
+            }
+            
+            // Emergency cleanup if too many segments
+            if (trailSegments.length > 3000) {
+                const excess = trailSegments.length - 2500;
+                for (let i = 0; i < excess; i++) {
+                    if (trailSegments[i]) {
+                        trailSegments[i].mesh.geometry.dispose();
+                        trailSegments[i].mesh.material.dispose();
+                        scene.remove(trailSegments[i].mesh);
+                    }
+                }
+                trailSegments.splice(0, excess);
             }
         }
         
         function updateTestParticles() {
             const negativeCharges = fixedCharges.filter(c => c.value < 0);
             
-            for (let i = testParticles.length - 1; i >= 0; i--) {
+            // Limit particles processed per frame for performance
+            const maxProcessPerFrame = Math.min(testParticles.length, 200);
+            
+            for (let i = testParticles.length - 1; i >= Math.max(0, testParticles.length - maxProcessPerFrame); i--) {
                 const particle = testParticles[i];
                 particle.age++;
                 
@@ -594,13 +663,19 @@
                     if (distance < 1.5) { // Destruction radius
                         shouldDestroy = true;
                         
-                        // Create destruction effect
-                        createDestructionEffect(particle.position, particle.color);
+                        // Create destruction effect (limited)
+                        if (trailSegments.length < 3500) {
+                            createDestructionEffect(particle.position, particle.color);
+                        }
                         break;
                     }
                 }
                 
                 if (shouldDestroy) {
+                    particle.mesh.geometry.dispose();
+                    particle.mesh.material.dispose();
+                    particle.glow.geometry.dispose();
+                    particle.glow.material.dispose();
                     scene.remove(particle.mesh);
                     scene.remove(particle.glow);
                     testParticles.splice(i, 1);
@@ -610,30 +685,51 @@
                 // Calculate electric field at particle position
                 const field = calculateElectricField(particle.position);
                 
+                // Check for NaN or infinite values
+                if (!isFinite(field.x) || !isFinite(field.y) || !isFinite(field.z)) {
+                    particle.mesh.geometry.dispose();
+                    particle.mesh.material.dispose();
+                    particle.glow.geometry.dispose();
+                    particle.glow.material.dispose();
+                    scene.remove(particle.mesh);
+                    scene.remove(particle.glow);
+                    testParticles.splice(i, 1);
+                    continue;
+                }
+                
                 // F = qE, a = F/m
                 const force = field.multiplyScalar(testCharge);
                 const acceleration = force.divideScalar(testMass);
                 
-                // Update velocity and position
+                // Update velocity and position with safety check
                 particle.velocity.add(acceleration.multiplyScalar(dt));
+                
+                // Limit maximum velocity to prevent instability
+                const maxSpeed = 50;
+                if (particle.velocity.length() > maxSpeed) {
+                    particle.velocity.normalize().multiplyScalar(maxSpeed);
+                }
                 
                 // Add damping
                 particle.velocity.multiplyScalar(0.99);
                 
-                const oldPosition = particle.position.clone();
                 particle.position.add(particle.velocity.clone().multiplyScalar(dt));
                 
                 // Update mesh
                 particle.mesh.position.copy(particle.position);
                 particle.glow.position.copy(particle.position);
                 
-                // Add trail segment every few frames
-                if (particle.age % 3 === 0) {
+                // Add trail segment every few frames (with limits)
+                if (particle.age % 4 === 0 && trailSegments.length < 4000) {
                     addTrailSegment(particle.position.clone(), particle.color);
                 }
                 
                 // Remove if too old or too far
-                if (particle.age > 2000 || particle.position.length() > 60) {
+                if (particle.age > 1500 || particle.position.length() > 60) {
+                    particle.mesh.geometry.dispose();
+                    particle.mesh.material.dispose();
+                    particle.glow.geometry.dispose();
+                    particle.glow.material.dispose();
                     scene.remove(particle.mesh);
                     scene.remove(particle.glow);
                     testParticles.splice(i, 1);
@@ -645,6 +741,9 @@
         }
         
         function createDestructionEffect(position, color) {
+            // Calculate opacity based on illumination
+            const baseOpacity = illumination / 100;
+            
             // Create a burst of small particles
             for (let i = 0; i < 8; i++) {
                 const angle = (i / 8) * Math.PI * 2;
@@ -659,7 +758,7 @@
                 const material = new THREE.MeshBasicMaterial({ 
                     color: color,
                     transparent: true,
-                    opacity: 1.0,
+                    opacity: 1.0 * baseOpacity,
                     blending: THREE.AdditiveBlending
                 });
                 const sphere = new THREE.Mesh(geometry, material);
@@ -670,15 +769,39 @@
                     mesh: sphere,
                     age: 0,
                     maxAge: 30,
-                    velocity: offset
+                    velocity: offset,
+                    baseOpacity: baseOpacity
                 });
             }
         }
         
         function setupControls() {
+            // Menu toggle
+            const menuToggle = document.getElementById('menu-toggle');
+            const controlsPanel = document.getElementById('controls');
+            let menuVisible = true;
+            
+            menuToggle.addEventListener('click', () => {
+                menuVisible = !menuVisible;
+                if (menuVisible) {
+                    controlsPanel.classList.remove('hidden');
+                    menuToggle.classList.remove('controls-hidden');
+                    menuToggle.textContent = '☰';
+                } else {
+                    controlsPanel.classList.add('hidden');
+                    menuToggle.classList.add('controls-hidden');
+                    menuToggle.textContent = '☰';
+                }
+            });
+            
             document.getElementById('test-particles').addEventListener('input', (e) => {
                 maxTestParticles = parseInt(e.target.value);
                 document.getElementById('test-particles-value').textContent = maxTestParticles;
+            });
+            
+            document.getElementById('spawn-count').addEventListener('input', (e) => {
+                spawnCount = parseInt(e.target.value);
+                document.getElementById('spawn-count-value').textContent = spawnCount;
             });
             
             document.getElementById('spawn-rate').addEventListener('input', (e) => {
@@ -692,10 +815,41 @@
                 document.getElementById('field-strength-value').textContent = fieldStrength.toFixed(1);
             });
             
+            document.getElementById('test-mass').addEventListener('input', (e) => {
+                testMass = parseFloat(e.target.value);
+                document.getElementById('test-mass-value').textContent = testMass.toFixed(3);
+            });
+            
             document.getElementById('decay-rate').addEventListener('input', (e) => {
                 decayRate = parseInt(e.target.value);
                 const rates = ['Very Slow', 'Slow', 'Medium', 'Fast', 'Very Fast'];
                 document.getElementById('decay-rate-value').textContent = rates[decayRate - 1];
+            });
+            
+            document.getElementById('fog-density').addEventListener('input', (e) => {
+                fogDensity = parseInt(e.target.value);
+                const densities = ['None', 'Light', 'Medium', 'Dense', 'Very Dense'];
+                document.getElementById('fog-density-value').textContent = densities[fogDensity];
+                updateFog();
+            });
+            
+            document.getElementById('illumination').addEventListener('input', (e) => {
+                illumination = parseInt(e.target.value);
+                document.getElementById('illumination-value').textContent = illumination + '%';
+                
+                // Update existing particles and trails
+                const baseOpacity = illumination / 100;
+                testParticles.forEach(particle => {
+                    particle.baseOpacity = baseOpacity;
+                    particle.mesh.material.opacity = 0.8 * baseOpacity;
+                    particle.glow.material.opacity = 0.3 * baseOpacity;
+                });
+                
+                trailSegments.forEach(segment => {
+                    const lifeRatio = 1 - (segment.age / segment.maxAge);
+                    segment.baseOpacity = baseOpacity;
+                    segment.mesh.material.opacity = Math.max(0, lifeRatio * 0.6 * baseOpacity);
+                });
             });
             
             document.getElementById('next-charge').addEventListener('input', (e) => {
@@ -738,8 +892,10 @@
         
         function setupMouseControls() {
             renderer.domElement.addEventListener('mousedown', (e) => {
-                isDragging = true;
-                prevMouse = { x: e.clientX, y: e.clientY };
+                if (!e.ctrlKey && !e.metaKey) {
+                    isDragging = true;
+                    prevMouse = { x: e.clientX, y: e.clientY };
+                }
             });
             
             renderer.domElement.addEventListener('mousemove', (e) => {
@@ -758,7 +914,8 @@
             });
             
             renderer.domElement.addEventListener('click', (e) => {
-                if (Math.abs(e.clientX - prevMouse.x) > 5 || Math.abs(e.clientY - prevMouse.y) > 5) return;
+                // Only place charges with Ctrl+Click or Cmd+Click (Mac)
+                if (!e.ctrlKey && !e.metaKey) return;
                 
                 mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
                 mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
@@ -786,9 +943,12 @@
             
             frameCount++;
             
-            // Spawn test particles based on rate
+            // Spawn test particles based on rate and count
             if (frameCount % (6 - spawnRate) === 0 && fixedCharges.length > 0) {
-                spawnTestParticle();
+                for (let i = 0; i < spawnCount; i++) {
+                    if (testParticles.length >= maxTestParticles) break;
+                    spawnTestParticle();
+                }
             }
             
             updateTestParticles();

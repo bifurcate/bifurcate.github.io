@@ -250,6 +250,9 @@
         let testMass = 0.01;
         const testCharge = 1.0; // Fixed at 1
         const k = 8.99; // Coulomb constant (scaled for visualization)
+
+        // Other constants
+        const destroyDistance = .5
         
         // Control values
         let maxTestParticles = 50;
@@ -299,11 +302,11 @@
             const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
             scene.add(ambientLight);
             
-            // Create reference grid
-            createGrid();
+            // Create reference grid (Disabled)
+            // createGrid();
             
-            // Create axes
-            createAxes();
+            // Create axes (Disabled)
+            // createAxes();
             
             // Initialize with default dipole configuration
             addFixedCharge(new THREE.Vector3(10, 0, 0), 1);
@@ -660,14 +663,14 @@
                 let shouldDestroy = false;
                 for (const negCharge of negativeCharges) {
                     const distance = particle.position.distanceTo(negCharge.position);
-                    if (distance < 1.5) { // Destruction radius
+                    if (distance < destroyDistance) { // Destruction radius
                         shouldDestroy = true;
                         
                         // Create destruction effect (limited)
-                        if (trailSegments.length < 3500) {
-                            createDestructionEffect(particle.position, particle.color);
-                        }
-                        break;
+                        // if (trailSegments.length < 3500) {
+                        //     createDestructionEffect(particle.position, particle.color);
+                        // }
+                        // break;
                     }
                 }
                 
